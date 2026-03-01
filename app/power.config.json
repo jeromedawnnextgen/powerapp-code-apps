@@ -1,8 +1,8 @@
 {
-  "appId": "",
+  "appId": "fd20a5ab-1f4a-413d-81cf-e40279926fe7",
   "appDisplayName": "NextGen Code App",
   "description": null,
-  "environmentId": "dc45a584-abd3-e0f7-b2d4-5a755347661a",
+  "environmentId": "2e4ff4ce-5107-eaa2-b6dd-a2832dee7708",
   "buildPath": "./dist",
   "buildEntryPoint": "index.html",
   "logoPath": "Default",

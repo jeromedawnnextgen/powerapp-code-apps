@@ -1,0 +1,125 @@
+name: Deploy — Power Platform
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRIGGERS
+#   • Automatic:  push to main (when app/src changes) deploys to DEV
+#   • Manual:     workflow_dispatch lets you choose environment
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/src/**'
+      - 'app/public/**'
+      - 'app/package*.json'
+      - 'app/vite.config.ts'
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REQUIRED GITHUB SECRETS (Settings → Secrets → Actions)
+#
+#   POWER_PLATFORM_CLIENT_ID        Service Principal Application (Client) ID
+#   POWER_PLATFORM_CLIENT_SECRET    Service Principal Client Secret
+#   POWER_PLATFORM_TENANT_ID        Azure AD Tenant ID
+#
+#   DEV_ENVIRONMENT_URL             https://orgXXX.crm.dynamics.com  (dev)
+#   STAGING_ENVIRONMENT_URL         https://orgXXX.crm.dynamics.com  (staging)
+#   PROD_ENVIRONMENT_URL            https://orgXXX.crm.dynamics.com  (prod)
+#
+# To create the Service Principal:
+#   pac admin create-service-principal --environment 2e4ff4ce-5107-eaa2-b6dd-a2832dee7708
+# ─────────────────────────────────────────────────────────────────────────────
+
+env:
+  NODE_VERSION: '20'
+  PAC_CLI_VERSION: '1.34.3'
+
+jobs:
+
+  deploy:
+    name: Deploy → ${{ github.event.inputs.environment || 'dev' }}
+    runs-on: ubuntu-latest
+
+    environment:
+      name: ${{ github.event.inputs.environment || 'dev' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: TypeScript check
+        working-directory: app
+        run: npx tsc --noEmit
+
+      - name: Build
+        working-directory: app
+        run: npm run build
+
+      - name: Install pac CLI
+        run: npm install -g @microsoft/power-apps-cli@${{ env.PAC_CLI_VERSION }}
+
+      - name: Authenticate — Service Principal
+        run: |
+          TARGET_ENV=${{ github.event.inputs.environment == 'prod' && secrets.PROD_ENVIRONMENT_URL || github.event.inputs.environment == 'staging' && secrets.STAGING_ENVIRONMENT_URL || secrets.DEV_ENVIRONMENT_URL }}
+          pac auth create \
+            --applicationId "${{ secrets.POWER_PLATFORM_CLIENT_ID }}" \
+            --clientSecret  "${{ secrets.POWER_PLATFORM_CLIENT_SECRET }}" \
+            --tenant        "${{ secrets.POWER_PLATFORM_TENANT_ID }}" \
+            --environment   "$TARGET_ENV" \
+            --name          ci-deploy
+
+      - name: Push to Power Platform
+        working-directory: app
+        run: pac code push
+
+      - name: Deployment summary
+        run: |
+          APP_ID=$(python3 -c "import sys,json; print(json.load(open('app/power.config.json'))['appId'])")
+          APP_NAME=$(python3 -c "import sys,json; print(json.load(open('app/power.config.json'))['appDisplayName'])")
+          echo "## ✅ Deployed: $APP_NAME" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| App ID | \`$APP_ID\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ github.event.inputs.environment || 'dev' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered by | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+
+  notify:
+    name: Notify Teams
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: |
+      always() &&
+      github.event.inputs.environment == 'prod' &&
+      secrets.TEAMS_WEBHOOK_URL != ''
+
+    steps:
+      - name: Post Teams notification
+        run: |
+          STATUS="${{ needs.deploy.result == 'success' && '✅ Success' || '❌ Failed' }}"
+          curl -s -X POST "${{ secrets.TEAMS_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"text\": \"**NextGen ITSM — Production Deploy**: $STATUS\n\nCommit: \`${{ github.sha }}\`\nBy: ${{ github.actor }}\n[View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\"
+            }"
